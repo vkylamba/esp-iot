@@ -12,14 +12,23 @@
 
 #define STASSID "Wi-Waere"
 #define STAPSK  "Danke678"
-#define LOOP_SLEEP_TIME 3 * 60 * 1000
+#define LOOP_SLEEP_TIME 3 * 60
 
 //Global declaration
 SHT3x sht30(0x44); //adress of SHT30
 const int analogInPin = A0;  //ADC-pin of AZ-Envy for the gas sensor
 const int integrated_led = 2; //integrated led is connected to D2
 
-float voltage, current, power, energy = 0;
+char payload[1000];
+float solar_voltage, solar_current, solar_power, solar_energy = 0;
+float battery_voltage, battery_current, battery_power, battery_energy = 0;
+float grid_voltage, grid_current, grid_power, grid_energy = 0;
+float inverter_voltage, inverter_current, inverter_power, inverter_energy = 0;
+float load_voltage, load_current, load_power, load_energy = 0;
+
+float SOLAR_TO_BATTERY = 0.3;
+
+long time_counter = LOOP_SLEEP_TIME;
 
 
 void calibrateSTH30() {
@@ -53,15 +62,7 @@ void setupWiFi() {
 }
 
 
-void postData(
-                float temperature,
-                float humidity,
-                float gas_sensor,
-                float voltage,
-                float current,
-                float power,
-                float energy
-) {
+void postData(char *payload) {
   if ((WiFi.status() == WL_CONNECTED)) {
 
     WiFiClient client;
@@ -75,12 +76,6 @@ void postData(
 
     Serial.print("[HTTP] POST...\n");
     // start connection and send HTTP header and body
-    char payload[500];
-    sprintf(
-        payload,
-        "{\"weather_meter\":{\"temperature\": %f, \"humidity\": %f, \"gas_sensor\": %f}, \"load_meter\":{\"voltage\": %f, \"current\": %f, \"power\": %f, \"energy\": %f}}",
-        temperature, humidity, gas_sensor, voltage, current, power, energy
-    );
 
     Serial.println("payload is:\n<<");
     Serial.println(payload);
@@ -128,54 +123,153 @@ void setup() {
 
 void loop() {
 
-  sht30.UpdateData();
-  //variables to work with
-  float temperature = sht30.GetTemperature(SHT3x::Cel); //read the temperature from SHT30
-  float humid = sht30.GetRelHumidity(); //read the humidity from SHT30
-  int sensorValue = analogRead(analogInPin); //read the ADC-pin → connected to MQ-2
-
-  //calibrate your temperature values - due to heat reasons from the MQ-2 (normally up to 4°C)
-  float temperature_deviation = 0.0; //enter the deviation from the mq2 due to the resulting heat in order to calibrate the temperature value 
-  float temperature_calibrated = temperature - temperature_deviation; //final value
-  
-  //-SHT30-//
-  if(sht30.GetError() == 0){
-    Serial.print("Temperature in Celsius: ");
-    Serial.println(temperature_calibrated);
-    Serial.print("Relative Humidity: ");
-    Serial.println(humid);
-  }
-  else //if useless values are measured
-  {
-    Serial.println("Error, please check hardware or code!");
-  }
-
-  //-MQ-2-//
-  Serial.println("----------------------------------------------"); //print to serial monitor
-  Serial.print("MQ2-value: "); //print to serial monitor
-  Serial.println(sensorValue); //print data to serial monitor
-  Serial.println("----------------------------------------------"); //print to serial monitor
-
-
-  voltage = random(220, 240) * 1.0;
-  current = random(0, 100) * 1.0;
-  power = voltage * current;
-  energy += power * (LOOP_SLEEP_TIME / 1000) / 3600000;
-
-  
-  postData(
-    temperature,
-    humid,
-    sensorValue * 1.0,
-    voltage,
-    current,
-    power,
-    energy
-  );
- 
   digitalWrite(integrated_led, HIGH);//turn the integrated led on
-  
-  delay(LOOP_SLEEP_TIME);
-
+  delay(300);
   digitalWrite(integrated_led, LOW);//turn the integrated led off
+  delay(700);
+  time_counter += 1;
+
+  if (time_counter >= LOOP_SLEEP_TIME) {
+    time_counter = 0;
+    sht30.UpdateData();
+    //variables to work with
+    float temperature = sht30.GetTemperature(SHT3x::Cel); //read the temperature from SHT30
+    float humid = sht30.GetRelHumidity(); //read the humidity from SHT30
+    int sensorValue = analogRead(analogInPin); //read the ADC-pin → connected to MQ-2
+
+    //calibrate your temperature values - due to heat reasons from the MQ-2 (normally up to 4°C)
+    float temperature_deviation = 0.0; //enter the deviation from the mq2 due to the resulting heat in order to calibrate the temperature value 
+    float temperature_calibrated = temperature - temperature_deviation; //final value
+    
+    //-SHT30-//
+    if(sht30.GetError() == 0){
+      Serial.print("Temperature in Celsius: ");
+      Serial.println(temperature_calibrated);
+      Serial.print("Relative Humidity: ");
+      Serial.println(humid);
+    }
+    else //if useless values are measured
+    {
+      Serial.println("Error, please check hardware or code!");
+    }
+
+    //-MQ-2-//
+    Serial.println("----------------------------------------------"); //print to serial monitor
+    Serial.print("MQ2-value: "); //print to serial monitor
+    Serial.println(sensorValue); //print data to serial monitor
+    Serial.println("----------------------------------------------"); //print to serial monitor
+
+
+    load_voltage = random(220, 240) * 1.0;
+    load_current = random(0, 50) * 1.0;
+    load_power = load_voltage * load_current;
+    load_energy += load_power * (LOOP_SLEEP_TIME) / 3600000;
+
+    solar_voltage = random(50, 140) * 1.0;
+    solar_current = random(0, 100) * 1.0;
+    solar_power = solar_voltage * solar_current;
+    solar_energy += solar_power * (LOOP_SLEEP_TIME) / 3600000;
+
+    grid_voltage = random(220, 240) * 1.0;
+    battery_voltage = random(42, 55) * 1.0;
+
+    float solar_surplus = solar_power - load_power;
+    // If available solar power is less than load
+    if (solar_surplus < 0) {
+      // if batteries are discharged, charge battery and supply partly to load from solar, and grid
+      if (battery_voltage < 45) {
+        battery_current = -1 * (solar_power * SOLAR_TO_BATTERY) / battery_voltage;
+        
+        inverter_voltage = load_voltage;
+        grid_voltage = load_voltage;
+        
+        inverter_current = solar_power * (1 - SOLAR_TO_BATTERY) / inverter_voltage;
+        grid_current = load_current - inverter_current;
+
+      } else {
+        // if batteries are charged, the load is partly on solar, and partly on battery
+        battery_current = (load_power - solar_power) / battery_voltage;
+
+        inverter_voltage = load_voltage;
+
+        inverter_current = load_current;
+        grid_current = 0;
+      }
+    } else {// if solar power is more then load
+      if (battery_voltage < 45) { // if batteries are discharged, charge battery
+        battery_current =  (load_power - solar_power) / battery_voltage;
+
+        inverter_voltage = load_voltage;
+
+        inverter_current = load_current;
+        grid_current = 0;
+      } else {
+        // if batteries are charged, export the power to grid
+        battery_current = 0;
+
+        inverter_voltage = load_voltage;
+        grid_voltage = load_voltage;
+
+        grid_current = (load_power - solar_power) / grid_voltage; // grid current will be negative here
+        inverter_current = load_current - grid_current;
+      }
+    }
+
+    battery_power = battery_voltage * battery_current;
+    battery_energy += battery_power * (LOOP_SLEEP_TIME) / 3600000;
+
+    grid_power = grid_voltage * grid_current;
+    grid_energy += grid_power * (LOOP_SLEEP_TIME) / 3600000;
+
+    inverter_power = inverter_voltage * inverter_current;
+    inverter_energy += inverter_power * (LOOP_SLEEP_TIME) / 3600000;
+
+    sprintf(
+        payload,
+        "{\
+          \"weather_meter\": {\
+              \"temperature\": %f,\
+              \"humidity\": %f,\
+              \"gas_sensor\": %f\
+          },\
+          \"solar_meter\": {\
+            \"voltage\": %f,\
+            \"current\": %f,\
+            \"power\": %f,\
+            \"energy\": %f\
+          },\
+          \"battery_meter\": {\
+            \"voltage\": %f,\
+            \"current\": %f,\
+            \"power\": %f,\
+            \"energy\": %f\
+          },\
+          \"grid_meter\": {\
+            \"voltage\": %f,\
+            \"current\": %f,\
+            \"power\": %f,\
+            \"energy\": %f\
+          },\
+          \"inverter_meter\": {\
+            \"voltage\": %f,\
+            \"current\": %f,\
+            \"power\": %f,\
+            \"energy\": %f\
+          },\
+          \"load_meter\": {\
+            \"voltage\": %f,\
+            \"current\": %f,\
+            \"power\": %f,\
+            \"energy\": %f\
+          }\
+        }",
+        temperature, humid, sensorValue * 1.0,
+        solar_voltage, solar_current, solar_power, solar_energy,
+        battery_voltage, battery_current, battery_power, battery_energy,
+        grid_voltage, grid_current, grid_power, grid_energy,
+        inverter_voltage, inverter_current, inverter_power, inverter_energy,
+        load_voltage, load_current, load_power, load_energy
+    );
+    postData(payload);
+  }
 }
